@@ -811,10 +811,10 @@ diff --git a/fs/namespace.c b/fs/namespace.c
  	new = copy_tree(old, old->mnt.mnt_root, copy_flags);
  	if (IS_ERR(new)) {
  		namespace_unlock();
-@@ -5053,3 +5268,34 @@
+@@ -5053,2 +5268,34 @@
  
  #endif /* CONFIG_SYSCTL */
- 
++
 +#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 +/* - To retrieve the non sus mnt_id from mount */
 +int susfs_get_non_sus_mnt_id_from_mnt(struct mount *orig_mnt) {
