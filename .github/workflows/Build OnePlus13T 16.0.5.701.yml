@@ -269,7 +269,7 @@ jobs:
         p.write_text(s)
         p = Path('init/Makefile')
         s = p.read_text()
-        s, n = re.subn(r'(?m)^\tutsver=.*; \\$', lambda _: "\tutsver='" + os.environ['STOCK_UTS_VERSION'] + "'; \\", s)
+        s, n = re.subn(r'(?m)^\tutsver=.*; \\$', lambda _: "\tutsver='" + os.environ['STOCK_UTS_VERSION'].replace('#', '$(pound)') + "'; \\", s)
         assert n == 1, 'Unexpected UTS_VERSION generation'
         p.write_text(s)
         PYCODE
@@ -604,6 +604,7 @@ jobs:
           kernel_workspace/kernel_platform/common/out/.config
         include-hidden-files: true
         if-no-files-found: ignore
+
 
 
 
