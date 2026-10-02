@@ -31,6 +31,12 @@ jobs:
         REMOVE_CODEQL: 'true'
       run: |
         bash scripts/maximize-build-space.sh
+    - name: Restore repository after workspace mount
+      uses: actions/checkout@v7
+    - name: Verify pinned profile files
+      run: |
+        test -s configs/oneplus13t-16.0.5.701.xml
+        test -s patches/oneplus13t-701/50_add_susfs.patch
     - name: Configure Git
       run: |
         git config --global user.name "kairuitan"
@@ -61,13 +67,9 @@ jobs:
     - name: Check Disk Space
       run: |
         df -h
-    - name: Create and Enable 3G Swap
+    - name: Check existing build swap
       run: |
-        sudo swapoff -a
-        sudo fallocate -l 3G /swapfile
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
+        swapon --show
         free -h
     - name: Install Dependencies
       run: |
@@ -540,3 +542,4 @@ jobs:
           kernel_workspace/kernel_platform/common/out/.config
         include-hidden-files: true
         if-no-files-found: ignore
+
