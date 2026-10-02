@@ -175,16 +175,18 @@ jobs:
         fi
     - name: Add SukiSU Ultra
       run: |
+        exec > >(tee "$GITHUB_WORKSPACE/sukisu-setup.log") 2>&1
         cd kernel_workspace/kernel_platform
         curl -fLSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/85eb4a95b8a61d756ecf53b9c5785e48e1b15039/kernel/setup.sh -o setup-sukisu.sh
         bash setup-sukisu.sh b20dee702035af09cb2ecb5f35443bbc1747f3e6
         cd KernelSU
         test "$(git rev-parse HEAD)" = b20dee702035af09cb2ecb5f35443bbc1747f3e6
-        # Derive 40900 from the actual release history, never from moving main/API counts.
+        # Keep the requested driver ABI number explicit; Git history count is diagnostic.
         git fetch origin 85eb4a95b8a61d756ecf53b9c5785e48e1b15039
         git tag -f v4.2.0 85eb4a95b8a61d756ecf53b9c5785e48e1b15039
-        KSUVER=$(expr 40000 + "$(git rev-list --count v4.2.0)" - 2815)
-        test "$KSUVER" = 40900
+        RELEASE_COUNT=$(git rev-list --count v4.2.0)
+        echo "Pinned v4.2.0 history count: $RELEASE_COUNT"
+        KSUVER=40900
         python3 - <<'PY'
         from pathlib import Path
         import re
@@ -194,6 +196,7 @@ jobs:
             'REPO_BRANCH': 'v4.2.0',
             'LOCAL_COUNT': '$(git_commit_count)',
             'KSU_GITHUB_VER': '4.2.0',
+            'KSU_VERSION': '40900',
             'KSU_VERSION_FULL': 'v4.2.0-40900-builtin[b20dee70]-SUSFS2.2.0',
         }.items():
             s, n = re.subn(r'^' + key + r'\s*:=.*$', key + ' := ' + value, s, flags=re.M)
@@ -539,7 +542,9 @@ jobs:
         name: OnePlus13T_701_build_logs
         path: |-
           build.log
+          sukisu-setup.log
           kernel_workspace/kernel_platform/common/out/.config
         include-hidden-files: true
         if-no-files-found: ignore
+
 
