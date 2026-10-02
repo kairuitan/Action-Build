@@ -18,6 +18,12 @@ jobs:
       CCACHE_IS_KERNEL_COMPILING: 'true'
       CCACHE_MAXSIZE: 5G
       CCACHE_DISABLE: '1'
+      STOCK_KERNEL_RELEASE: "6.6.89-android15-8-g7e1f3c083cc6-abogki467167594-4k"
+      STOCK_UTS_VERSION: "#1 SMP PREEMPT Mon Dec  8 04:00:43 UTC 2025"
+      KBUILD_BUILD_USER: "kleaf"
+      KBUILD_BUILD_HOST: "build-host"
+      KBUILD_BUILD_TIMESTAMP: "Mon Dec  8 04:00:43 UTC 2025"
+      KBUILD_BUILD_VERSION: "1"
     steps:
     - name: Checkout
       uses: actions/checkout@v7
@@ -247,6 +253,27 @@ jobs:
         for option in KSU KPM KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MAP KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT; do
           scripts/config --file "$CONFIG_FILE" -e "$option"
         done
+    - name: Match verified stock 701 kernel identity
+      run: |
+        cd kernel_workspace/kernel_platform/common
+        python3 - <<'PYCODE'
+        from pathlib import Path
+        import os, re
+        release = os.environ['STOCK_KERNEL_RELEASE']
+        assert release.startswith('6.6.89-android15-') and '-dirty' not in release
+        p = Path('scripts/setlocalversion')
+        s = p.read_text()
+        old = 'echo "${KERNELVERSION}${file_localversion}${config_localversion}${LOCALVERSION}${scm_version}"'
+        assert s.count(old) == 1, 'Unexpected setlocalversion output'
+        s = s.replace(old, "printf '%s\n' '" + release + "'")
+        p.write_text(s)
+        p = Path('init/Makefile')
+        s = p.read_text()
+        s, n = re.subn(r'(?m)^\tutsver=.*; \\$', lambda _: "\tutsver='" + os.environ['STOCK_UTS_VERSION'] + "'; \\", s)
+        assert n == 1, 'Unexpected UTS_VERSION generation'
+        p.write_text(s)
+        PYCODE
+        printf '%s\n' "Release: $STOCK_KERNEL_RELEASE" "UTS: $STOCK_UTS_VERSION" "Builder: $KBUILD_BUILD_USER@$KBUILD_BUILD_HOST"
     - name: Build Kernel FAST
       id: fast_build
       run: |
@@ -410,6 +437,10 @@ jobs:
 
         MAKE_ARGS=(
           LLVM=1
+          KBUILD_BUILD_USER="$KBUILD_BUILD_USER"
+          KBUILD_BUILD_HOST="$KBUILD_BUILD_HOST"
+          KBUILD_BUILD_TIMESTAMP="$KBUILD_BUILD_TIMESTAMP"
+          KBUILD_BUILD_VERSION="$KBUILD_BUILD_VERSION"
           ARCH=arm64
           CROSS_COMPILE=aarch64-linux-gnu-
           CC="$CC_WRAPPER"
@@ -464,6 +495,31 @@ jobs:
           LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
           ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
         fi
+    - name: Verify generated stock kernel identity
+      run: |
+        cd kernel_workspace/kernel_platform
+        python3 - <<'PYCODE'
+        from pathlib import Path
+        import os, re
+        root = Path('.')
+        headers = list(root.glob('common/out/include/generated/utsrelease.h'))
+        if not headers:
+            headers = list(root.glob('out/**/include/generated/utsrelease.h'))
+        assert headers, 'Generated identity headers not found'
+        for header in headers:
+            base = header.parent
+            release = re.search(r'#define UTS_RELEASE "(.*)"', header.read_text())[1]
+            version = re.search(r'#define UTS_VERSION "(.*)"', (base / 'utsversion.h').read_text())[1]
+            compile_text = (base / 'compile.h').read_text()
+            user = re.search(r'#define LINUX_COMPILE_BY\s+"(.*)"', compile_text)[1]
+            host = re.search(r'#define LINUX_COMPILE_HOST\s+"(.*)"', compile_text)[1]
+            assert release == os.environ['STOCK_KERNEL_RELEASE'], release
+            assert version == os.environ['STOCK_UTS_VERSION'], version
+            assert user == os.environ['KBUILD_BUILD_USER'], user
+            assert host == os.environ['KBUILD_BUILD_HOST'], host
+            print('Verified identity:', release, version, user + '@' + host)
+            Path(os.environ['GITHUB_WORKSPACE'], 'kernel-identity.txt').write_text(release + '\n' + version + '\n' + user + '@' + host + '\n')
+        PYCODE
     - name: Make AnyKernel3
       run: |
         git clone https://github.com/Numbersf/AnyKernel3
@@ -526,6 +582,7 @@ jobs:
         SUSFS: v2.2.0 / a5d22370122e0eb2b2f7c5e3cadaa30ea1e3ca2f
         KPM: enabled, Image patched
         INFO
+        cat kernel-identity.txt >> AnyKernel3/build-info.txt
         mkdir -p artifacts
         (cd AnyKernel3 && zip -qr ../artifacts/AK3_OnePlus13T_16.0.5.701_6.6.89_Suki40900_KPM_SUSFS.zip .)
         sha256sum artifacts/*.zip | tee artifacts/SHA256SUMS.txt
@@ -543,8 +600,10 @@ jobs:
         path: |-
           build.log
           sukisu-setup.log
+          kernel-identity.txt
           kernel_workspace/kernel_platform/common/out/.config
         include-hidden-files: true
         if-no-files-found: ignore
+
 
 
