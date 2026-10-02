@@ -272,6 +272,14 @@ jobs:
         s, n = re.subn(r'(?m)^\tutsver=.*; \\$', lambda _: "\tutsver='" + os.environ['STOCK_UTS_VERSION'].replace('#', '$(pound)') + "'; \\", s)
         assert n == 1, 'Unexpected UTS_VERSION generation'
         p.write_text(s)
+        # Kleaf resets these values when _setup_env.sh is sourced.
+        import shlex
+        p = Path('../build/kernel/_setup_env.sh')
+        s = p.read_text()
+        for key in ('KBUILD_BUILD_USER', 'KBUILD_BUILD_HOST', 'KBUILD_BUILD_TIMESTAMP', 'KBUILD_BUILD_VERSION'):
+            s, n = re.subn(r'(?m)^export ' + key + r'=.*$', lambda _, key=key: 'export ' + key + '=' + shlex.quote(os.environ[key]), s)
+            assert n == 1, 'Unexpected Kleaf identity assignment: ' + key
+        p.write_text(s)
         PYCODE
         printf '%s\n' "Release: $STOCK_KERNEL_RELEASE" "UTS: $STOCK_UTS_VERSION" "Builder: $KBUILD_BUILD_USER@$KBUILD_BUILD_HOST"
     - name: Build Kernel FAST
@@ -481,6 +489,22 @@ jobs:
         for key in CONFIG_KSU CONFIG_KPM CONFIG_KSU_SUSFS; do
           grep -qx "$key=y" out/.config || { echo "Missing required option: $key" >&2; exit 1; }
         done
+        # Check effective user/host/release before the expensive full build.
+        make O=out "${MAKE_ARGS[@]}" include/generated/utsrelease.h include/generated/compile.h
+        python3 - <<'EARLY'
+        from pathlib import Path
+        import os, re
+        root = Path('out/include/generated')
+        checks = (
+            ('utsrelease.h', 'UTS_RELEASE', 'STOCK_KERNEL_RELEASE'),
+            ('compile.h', 'LINUX_COMPILE_BY', 'KBUILD_BUILD_USER'),
+            ('compile.h', 'LINUX_COMPILE_HOST', 'KBUILD_BUILD_HOST'),
+        )
+        for file, key, env in checks:
+            actual = re.search(r'#define ' + key + r'\s+"(.*)"', (root / file).read_text())[1]
+            assert actual == os.environ[env], (key, actual, os.environ[env])
+            print('Early identity verified:', key, actual)
+        EARLY
         make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
         ccache -s
     - name: Fallback to Build Kernel
@@ -604,6 +628,7 @@ jobs:
           kernel_workspace/kernel_platform/common/out/.config
         include-hidden-files: true
         if-no-files-found: ignore
+
 
 
 
