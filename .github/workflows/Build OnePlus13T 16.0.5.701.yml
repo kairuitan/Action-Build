@@ -1,0 +1,542 @@
+name: Build OnePlus13T 16.0.5.701
+'on':
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  build:
+    name: OnePlus13T 701 / 6.6.89 / Suki40900 / KPM / SUSFS2.2.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CCACHE_COMPILERCHECK: none
+      CCACHE_NOHASHDIR: 'true'
+      CCACHE_NOHARDLINK: 'true'
+      CCACHE_IS_KERNEL_COMPILING: 'true'
+      CCACHE_MAXSIZE: 5G
+      CCACHE_DISABLE: '1'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+    - name: Maximize Build Space
+      env:
+        ROOT_RESERVE_MB: '8192'
+        TEMP_RESERVE_MB: '2048'
+        REMOVE_DOTNET: 'true'
+        REMOVE_ANDROID: 'true'
+        REMOVE_HASKELL: 'true'
+        REMOVE_CODEQL: 'true'
+      run: |
+        bash scripts/maximize-build-space.sh
+    - name: Configure Git
+      run: |
+        git config --global user.name "kairuitan"
+        git config --global user.email "109792058+kairuitan@users.noreply.github.com"
+        mkdir kernel_workspace
+        git clone https://github.com/Numbersf/Action-Build.git kernel_workspace/Action-Build
+        git -C kernel_workspace/Action-Build checkout --detach 1769d3eb8e81497df0990d2aceb8ad761ff50a82
+    - name: Extract Manifest Info
+      id: extract_info
+      env:
+        FILE: oneplus_13t_b
+      run: |
+        mkdir -p .repo/manifests_fallback
+        cp configs/oneplus13t-16.0.5.701.xml .repo/manifests_fallback/oneplus_13t_b.xml
+        cat >> "$GITHUB_ENV" <<'ENV'
+        FILE_CONF=oneplus_13t
+        FILE_BASE=OnePlus13T
+        CPU=sm8750
+        CPUD=sun
+        ANDROID_VERSION=16.0.0
+        ANDROID_SHORT_VERSION=16
+        BUILD_METHOD=perf
+        MANIFEST_REPO=OnePlusOSS
+        MANIFEST_REPO_NAME=kernel_manifest
+        MANIFEST_BRANCH=oneplus/sm8750
+        ENV
+        echo 'value=OnePlus13T_16.0.5.701' >> "$GITHUB_OUTPUT"
+    - name: Check Disk Space
+      run: |
+        df -h
+    - name: Create and Enable 3G Swap
+      run: |
+        sudo swapoff -a
+        sudo fallocate -l 3G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+    - name: Install Dependencies
+      run: |
+        export APT_PACKAGES="python3 git curl libelf-dev build-essential flex bison libssl-dev libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk dos2unix kmod libdw-dev elfutils dwarves"
+        bash "$GITHUB_WORKSPACE/kernel_workspace/Action-Build/scripts/cache_apt_pkgs.sh" ~/.apt-pkg-cache
+    - name: Setup Ccache-ECS
+      run: |
+        LIB_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/lib"
+        sudo cp -f "$LIB_DIR/ccache" /usr/bin/ccache && sudo chmod +x /usr/bin/ccache
+    - name: Reject Check
+      run: |
+        REJ_CHECKER="$GITHUB_WORKSPACE/kernel_workspace/Action-Build/scripts/check_rejects.sh"
+        chmod +x "$REJ_CHECKER"
+        echo "REJ_CHECKER=$REJ_CHECKER" >> $GITHUB_ENV
+    - name: Install Repo Tool
+      run: |
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/repo
+        chmod a+x ~/repo
+        sudo mv ~/repo /usr/local/bin/repo
+    - name: Initialize Repo and Sync
+      env:
+        FILE: oneplus_13t_b
+      run: |
+        cd kernel_workspace
+        mkdir -p .repo/manifests
+        cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml" ".repo/manifests/${FILE}.xml"
+        BASE_URL="https://github.com/${MANIFEST_REPO}/${MANIFEST_REPO_NAME}.git"
+
+        echo "使用$MANIFEST_REPO/$MANIFEST_REPO_NAME($MANIFEST_BRANCH)初始化仓库..."
+        repo init -u "$BASE_URL" -b "$MANIFEST_BRANCH" -m "${FILE}.xml" --depth=1 --no-clone-bundle --no-tags
+        sed -i -e '/prebuilts\/asuite"/{/ks-kernel\.lnx\.5\.0\.r3-rel/d}' -e '/tools\/tradefederation\/prebuilts"/{/ks-kernel\.lnx\.5\.0\.r3-rel/d}' ".repo/manifests/${FILE}.xml"
+        cp "$GITHUB_WORKSPACE/.repo/manifests_fallback/oneplus_13t_b.xml" .repo/manifests/oneplus_13t_b.xml
+        repo sync -c -j$(nproc) --no-clone-bundle --no-tags --force-sync
+
+        KERNEL_REPOS=""
+        KERNEL_REPOS_PATH=$(find . -type f -name "build.config.msm.common" | head -n 1)
+        if [[ -n "$KERNEL_REPOS_PATH" ]]; then
+          KERNEL_REPOS=$(echo "${KERNEL_REPOS_PATH#./}" | cut -d/ -f2)
+          echo "✅ 发现 build.config.msm.common: $KERNEL_REPOS_PATH"
+          echo "✅ KERNEL_REPOS=$KERNEL_REPOS"
+          echo "KERNEL_REPOS=$KERNEL_REPOS" >> "$GITHUB_ENV"
+        else
+          echo "❎ 未找到 build.config.msm.common，可能是天玑清单或纯 Kleaf 构建结构"
+        fi
+
+        # 移除 ABI 保护
+        for dir in kernel_platform/common kernel_platform/$KERNEL_REPOS; do
+          if [ -e "$dir/BUILD.bazel" ]; then
+            sed -i '/^[[:space:]]*"protected_exports_list"[[:space:]]*:[[:space:]]*"android\/abi_gki_protected_exports_aarch64",$/d' "$dir/BUILD.bazel"
+          fi
+          rm -f "$dir/android/abi_gki_protected_exports_"* 2>/dev/null || echo "No protected exports in $dir"
+        done
+
+        # 移除构建审查
+        if grep -q 'check_defconfig' kernel_platform/common/build.config.gki; then
+          sed -i 's/check_defconfig//' kernel_platform/common/build.config.gki
+        fi
+        if grep -q 'check_defconfig = None,' kernel_platform/build/kernel/kleaf/common_kernels.bzl; then
+          sed -i 's/check_defconfig = None,/check_defconfig = "disabled",/' kernel_platform/build/kernel/kleaf/common_kernels.bzl
+          sed -i 's/if check_defconfig == None:/if False:  # check_defconfig == None:/' kernel_platform/build/kernel/kleaf/common_kernels.bzl
+        fi
+    - name: Kernel Version Handling
+      run: |
+        cd kernel_workspace/kernel_platform
+        VERSION=$(awk '/^VERSION =/ {print $3}' common/Makefile)
+        PATCHLEVEL=$(awk '/^PATCHLEVEL =/ {print $3}' common/Makefile)
+        SUBLEVEL=$(awk '/^SUBLEVEL =/ {print $3}' common/Makefile)
+        test "$VERSION.$PATCHLEVEL.$SUBLEVEL" = 6.6.89
+        KMI=$(grep -m1 '^BRANCH=' common/build.config.common | cut -d= -f2)
+        test "$KMI" = android15-6.6
+        cat >> "$GITHUB_ENV" <<'ENV'
+        VERSIONLEVEL=6
+        PATCHLEVEL=6
+        SUBLEVEL=89
+        KMI=android15-6.6
+        KANDROID_VERSION=android15
+        KERNEL_VERSION=6.6
+        CKERNEL_VERSION=6.6.89
+        KERNEL_SHORT_PATCH_VERSION=6_6
+        ENV
+        echo "Source verified: 6.6.89 / $KMI / PKX110_16.0.5.701(CN01)"
+    - name: Rust Version Handling
+      run: |
+        cd kernel_workspace/kernel_platform
+        # 从 build.config.constants 读取 RUSTC_VERSION
+        RUSTC_VERSION=""
+        if [[ -f ./common/build.config.constants ]]; then
+          RUSTC_VERSION=$(grep '^RUSTC_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
+        fi
+        if [[ -n "$RUSTC_VERSION" ]]; then
+          echo "✅ RUSTC_VERSION(原始)=$RUSTC_VERSION"
+          RUSTC_DIR_VERSION=$(echo "$RUSTC_VERSION" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+          if [[ -z "$RUSTC_DIR_VERSION" ]]; then
+            RUSTC_DIR_VERSION="$RUSTC_VERSION"
+          fi
+          echo "✅ RUSTC_DIR_VERSION(用于目录匹配)=$RUSTC_DIR_VERSION"
+          echo "RUSTC_VERSION=$RUSTC_VERSION" >> $GITHUB_ENV
+          echo "RUSTC_DIR_VERSION=$RUSTC_DIR_VERSION" >> $GITHUB_ENV
+          echo "ENABLE_RUST=true" >> $GITHUB_ENV
+        else
+          echo "✅ RUSTC_VERSION 未找到，Rust 编译已禁用"
+          echo "ENABLE_RUST=false" >> $GITHUB_ENV
+        fi
+    - name: Add SukiSU Ultra
+      run: |
+        cd kernel_workspace/kernel_platform
+        curl -fLSs https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/85eb4a95b8a61d756ecf53b9c5785e48e1b15039/kernel/setup.sh -o setup-sukisu.sh
+        bash setup-sukisu.sh b20dee702035af09cb2ecb5f35443bbc1747f3e6
+        cd KernelSU
+        test "$(git rev-parse HEAD)" = b20dee702035af09cb2ecb5f35443bbc1747f3e6
+        # Derive 40900 from the actual release history, never from moving main/API counts.
+        git fetch origin 85eb4a95b8a61d756ecf53b9c5785e48e1b15039
+        git tag -f v4.2.0 85eb4a95b8a61d756ecf53b9c5785e48e1b15039
+        KSUVER=$(expr 40000 + "$(git rev-list --count v4.2.0)" - 2815)
+        test "$KSUVER" = 40900
+        python3 - <<'PY'
+        from pathlib import Path
+        import re
+        p = Path('kernel/Makefile')
+        s = p.read_text()
+        for key, value in {
+            'REPO_BRANCH': 'v4.2.0',
+            'LOCAL_COUNT': '$(git_commit_count)',
+            'KSU_GITHUB_VER': '4.2.0',
+            'KSU_VERSION_FULL': 'v4.2.0-40900-builtin[b20dee70]-SUSFS2.2.0',
+        }.items():
+            s, n = re.subn(r'^' + key + r'\s*:=.*$', key + ' := ' + value, s, flags=re.M)
+            if n != 1:
+                raise SystemExit('Unexpected SukiSU Makefile: ' + key)
+        p.write_text(s)
+        PY
+        echo "KSUVER=$KSUVER" >> "$GITHUB_ENV"
+    - name: Apply Patches SukiSU Ultra
+      env:
+        FILE: oneplus_13t_b
+      run: |
+        cd kernel_workspace
+        git clone https://github.com/cctv18/susfs4oki.git -b oki-android15-6.6 susfs4ksu
+        git -C susfs4ksu checkout --detach a5d22370122e0eb2b2f7c5e3cadaa30ea1e3ca2f
+        git clone https://github.com/SukiSU-Ultra/SukiSU_patch.git
+        git -C SukiSU_patch checkout --detach 547ae94bcaec53d030398f857950c64662043a5d
+        cp susfs4ksu/kernel_patches/fs/* kernel_platform/common/fs/
+        cp susfs4ksu/kernel_patches/include/linux/* kernel_platform/common/include/linux/
+        cd kernel_platform/common
+        grep -q '"v2.2.0"' include/linux/susfs.h
+        # Exact contexts are adapted to the 701 source; stop on any rejected hunk.
+        patch --batch --fuzz=0 -p1 < "$GITHUB_WORKSPACE/patches/oneplus13t-701/50_add_susfs.patch"
+        if grep -q 'ksu_handle_post_execveat_sucompat' fs/exec.c; then
+          echo 'Incompatible post-exec hook found' >&2
+          exit 1
+        fi
+    - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI
+      run: |
+        PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
+        cd kernel_workspace/kernel_platform/common
+        for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
+          [ -d "$p" ] && {
+            echo "源码中风驰代码已经存在，启用二次回退"
+            exit 0
+          }
+        done
+        sed -i '1iobj-y += hmbird_patch.o' drivers/Makefile
+        echo "正在打OGKI转换GKI补丁"
+        patch -p1 -F 3 < "${PATCH_DIR}/hmbird_patch.patch" || true
+        echo "OGKI转换GKI_patch完成"
+        source $REJ_CHECKER
+        check_rejects .
+    - name: Add Configuration Settings
+      run: |
+        cd kernel_workspace/kernel_platform/common
+        CONFIG_FILE=arch/arm64/configs/gki_defconfig
+        for option in KSU KPM KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MAP KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT; do
+          scripts/config --file "$CONFIG_FILE" -e "$option"
+        done
+    - name: Build Kernel FAST
+      id: fast_build
+      run: |
+        exec > >(tee "$GITHUB_WORKSPACE/build.log") 2>&1
+        cd kernel_workspace/kernel_platform
+
+        # 自动检测 LLVM_IAS
+        if [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
+          USE_LLVM_IAS=true
+        else
+          USE_LLVM_IAS=false
+        fi
+
+        # 强制递推路径
+        CLANG_PREBUILT_NAME=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/clang/host/linux-x86' \; -print | head -1)
+        CLANG_PREBUILT_NAME=$(basename "${CLANG_PREBUILT_NAME:-}")
+        echo "✅ CLANG_PREBUILT_NAME=$CLANG_PREBUILT_NAME"
+
+        KERNEL_BUILD_TOOLS_PREBUILT_NAME=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/kernel-build-tools' \; -print | head -1)
+        KERNEL_BUILD_TOOLS_PREBUILT_NAME=$(basename "${KERNEL_BUILD_TOOLS_PREBUILT_NAME:-}")
+        echo "✅ KERNEL_BUILD_TOOLS_PREBUILT_NAME=$KERNEL_BUILD_TOOLS_PREBUILT_NAME"
+
+        if [[ "$ENABLE_RUST" == "true" ]]; then
+          RUST_TOOLS_PREBUILT_NAME=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/rust' \; -print | head -1)
+          RUST_TOOLS_PREBUILT_NAME=$(basename "${RUST_TOOLS_PREBUILT_NAME:-}")
+          echo "✅ RUST_TOOLS_PREBUILT_NAME=$RUST_TOOLS_PREBUILT_NAME"
+        fi
+
+        # 从 build.config.common 读取 CLANG_PREBUILT_BIN，或者用递推路径 fallback
+        CLANG_PREBUILT_BIN=""
+        if [[ -f ./common/build.config.common ]]; then
+          CLANG_PREBUILT_BIN=$(grep '^CLANG_PREBUILT_BIN=' ./common/build.config.common | cut -d'=' -f2-)
+        fi
+
+        if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
+          CLANG_PREBUILT_BIN="${CLANG_PREBUILT_NAME}/clang/host/linux-x86/clang-zakozako/bin"
+        fi
+
+        # 优先尝试从 CLANG_PREBUILT_BIN 识别出 clang-r，再去掉 clang-，作为 CLANG_VERSION
+        if [[ "$CLANG_PREBUILT_BIN" =~ clang-(r[0-9a-z]+) ]]; then
+          CLANG_VERSION="${BASH_REMATCH[1]}"
+        else
+          # 如果未匹配到，尝试从 build.config.constants 提取
+          if [[ -f ./common/build.config.constants ]]; then
+            CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
+          fi
+        fi
+
+        if [[ -z "$CLANG_VERSION" ]]; then
+          echo "⚠️ 未能从 CLANG_PREBUILT_BIN 或 build.config.constants 获取到 Clang 版本，回退至官方构建脚本"
+          echo "fallback=true" >> "$GITHUB_OUTPUT"
+          echo "请考虑关闭 FAST_BUILD 并提交问题"
+          exit 0
+        fi
+
+        CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}"
+        CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN/clang-zakozako/clang-${CLANG_VERSION}}"
+
+        echo "✅ CLANG_PREBUILT_BIN=$CLANG_PREBUILT_BIN"
+        echo "✅ CLANG_VERSION=$CLANG_VERSION"
+        echo "✅ USE_LLVM_IAS=$USE_LLVM_IAS"
+
+        set +u
+        source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
+        set -u
+
+        export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
+        CLANG_LIB_PATH="${CLANG_PREBUILT_BIN%/bin}"
+        if [[ -d "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_LIB_PATH/lib" ]]; then
+          export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_LIB_PATH/lib"
+        elif [[ -d "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/clang-${CLANG_VERSION}/lib" ]]; then
+          export LIBCLANG_PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/clang-${CLANG_VERSION}/lib"
+        else
+          export LIBCLANG_PATH="$(clang --print-resource-dir 2>/dev/null | sed 's|/lib/clang/.*||')/lib"
+          echo "⚠️ LIBCLANG_PATH fallback to system: $LIBCLANG_PATH"
+        fi
+        echo "✅ LIBCLANG_PATH=$LIBCLANG_PATH"
+        export PATH="/usr/lib/ccache:$PATH"
+
+        # BINDGEN 检测与 fallback
+        if [[ "$ENABLE_RUST" == "true" ]]; then
+          BINDGEN_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_NAME/clang-tools/linux-x86/bin/bindgen"
+          if [ -x "$BINDGEN_BIN" ]; then
+            export BINDGEN="$BINDGEN_BIN"
+            echo "✅ bindgen exists: $BINDGEN_BIN"
+          else
+            echo "⚠️ prebuilts bindgen 未找到，fallback 到 cargo 安装 bindgen 0.69.5"
+            echo "::group::Install bindgen via cargo"
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            source "$HOME/.cargo/env"
+            cargo install bindgen-cli --version 0.69.5
+            echo "::endgroup::"
+            BINDGEN_BIN=$(which bindgen)
+            export BINDGEN="$BINDGEN_BIN"
+            echo "✅ BINDGEN_BIN (cargo): $BINDGEN_BIN"
+          fi
+        fi
+
+        # PAHOLE 检测与 fallback
+        PAHOLE_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$KERNEL_BUILD_TOOLS_PREBUILT_NAME/kernel-build-tools/linux-x86/bin/pahole"
+        if [ ! -x "$PAHOLE_BIN" ]; then
+          PAHOLE_BIN="$(which pahole 2>/dev/null)"
+          [ -x "$PAHOLE_BIN" ] && echo "⚠️ pahole fallback to PATH: $PAHOLE_BIN"
+        fi
+        if [ -x "$PAHOLE_BIN" ]; then
+          echo "✅ pahole exists: $PAHOLE_BIN"
+        else
+          echo "❌ pahole 完全缺失，终止构建"
+          exit 13
+        fi
+
+        # RUSTC 检测与 fallback
+        if [[ "$ENABLE_RUST" == "true" ]]; then
+          RUSTC_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$RUST_TOOLS_PREBUILT_NAME/rust/linux-x86/$RUSTC_DIR_VERSION/bin/rustc"
+          if [ ! -x "$RUSTC_BIN" ]; then
+            RUSTC_BIN="$(which rustc 2>/dev/null)"
+            [ -x "$RUSTC_BIN" ] && echo "⚠️ rustc fallback to PATH: $RUSTC_BIN"
+          fi
+          if [ -x "$RUSTC_BIN" ]; then
+            echo "✅ rustc exists: $RUSTC_BIN"
+            export RUSTC="$RUSTC_BIN"
+          else
+            echo "❌ rustc 完全缺失且 ENABLE_RUST=true，终止构建"
+            exit 13
+          fi
+        fi
+
+        LD_WRAPPER=""
+        if [ "true" = "false" ] && [[ "$KERNEL_VERSION" == 5.* ]]; then
+          LDCACHE_DIR="${GITHUB_WORKSPACE}/kernel_workspace/.thinlto-cache"
+          mkdir -p "$LDCACHE_DIR"
+          LD_WRAPPER="${GITHUB_WORKSPACE}/kernel_workspace/ld-wrapper"
+          LLD_BIN="$(command -v ld.lld)"
+          if [[ -z "$LLD_BIN" ]]; then
+            echo "⚠️ ld.lld 未找到，无法创建 ld-wrapper"
+          fi
+          printf '#!/bin/bash\nexec "%s" "$@" --thinlto-cache-dir="%s" --thinlto-cache-policy=cache_size_bytes=3g --thinlto-jobs=%s\n' "$LLD_BIN" "$LDCACHE_DIR" "$(nproc --all)" > "$LD_WRAPPER"
+          chmod +x "$LD_WRAPPER"
+          echo "✅ ld-wrapper 已创建: $LD_WRAPPER (lld=$LLD_BIN, cache=$LDCACHE_DIR)"
+        fi
+
+        REAL_CLANG_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN/clang"
+        CC_WRAPPER="$GITHUB_WORKSPACE/kernel_workspace/cc-wrapper"
+        printf '#!/bin/bash\nexec ccache "%s" "$@"\n' "$REAL_CLANG_BIN" > "$CC_WRAPPER"
+        chmod +x "$CC_WRAPPER"
+        echo "✅ cc-wrapper 已创建: $CC_WRAPPER (clang=$REAL_CLANG_BIN)"
+
+        cd ./common
+
+        # 重映射物理路径
+        COMMON_REAL_PATH=$(pwd -P)
+        PLATFORM_REAL_PATH=$(dirname "$COMMON_REAL_PATH")
+        ROOT_REAL_PATH=$(dirname "$PLATFORM_REAL_PATH")
+        MAP="-fdebug-prefix-map=$ROOT_REAL_PATH=."
+        MPMAP="-fmacro-prefix-map=$ROOT_REAL_PATH=."
+        FPMAP="-ffile-prefix-map=$ROOT_REAL_PATH=."
+
+        # KCFLAGS
+        KCFLAGS="$MAP $FPMAP -no-canonical-prefixes -O2 -pipe -Wno-error -fno-stack-protector -D__ANDROID_COMMON_KERNEL__"
+        KCPPFLAGS="$MPMAP"
+
+        MAKE_ARGS=(
+          LLVM=1
+          ARCH=arm64
+          CROSS_COMPILE=aarch64-linux-gnu-
+          CC="$CC_WRAPPER"
+          HOSTCC="$CC_WRAPPER"
+          HOSTLD=ld.lld
+          PAHOLE="$PAHOLE_BIN"
+          KCFLAGS="$KCFLAGS"
+          KCPPFLAGS="$KCPPFLAGS"
+        )
+
+        if [[ -n "${CONFIG_FAKE_DISABLE:-}" ]]; then
+          MAKE_ARGS+=(CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE")
+        fi
+        if [[ -n "$LD_WRAPPER" ]]; then
+          MAKE_ARGS+=(LD="$LD_WRAPPER")
+        else
+          MAKE_ARGS+=(LD=ld.lld)
+        fi
+        if [[ "$USE_LLVM_IAS" == "true" ]]; then
+          MAKE_ARGS+=(LLVM_IAS=1)
+        fi
+        if [[ "$ENABLE_RUST" == "true" ]]; then
+          MAKE_ARGS+=(RUSTC="$RUSTC_BIN")
+          MAKE_ARGS+=(BINDGEN="$BINDGEN_BIN")
+        fi
+
+        make O=out "${MAKE_ARGS[@]}" gki_defconfig --no-print-directory
+
+        if [[ "$KERNEL_VERSION" == 5.* ]]; then
+          echo "# 设置 LTO = thin"
+          scripts/config --file out/.config -e LTO_CLANG
+          scripts/config --file out/.config -e LTO_CLANG_THIN
+          scripts/config --file out/.config -d LTO_CLANG_NONE
+          scripts/config --file out/.config -d LTO_CLANG_FULL
+        fi
+
+        make O=out "${MAKE_ARGS[@]}" olddefconfig --no-print-directory
+        for key in CONFIG_KSU CONFIG_KPM CONFIG_KSU_SUSFS; do
+          grep -qx "$key=y" out/.config || { echo "Missing required option: $key" >&2; exit 1; }
+        done
+        make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
+        ccache -s
+    - name: Fallback to Build Kernel
+      if: ${{ steps.fast_build.outputs.fallback == 'true' }}
+      run: |
+        exec > >(tee -a "$GITHUB_WORKSPACE/build.log") 2>&1
+        cd kernel_workspace
+        if [ -f ./kernel_platform/build_with_bazel.py ]; then
+          ./kernel_platform/oplus/bazel/oplus_modules_variant.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+          ./kernel_platform/build_with_bazel.py -t ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+        else
+          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
+          ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+        fi
+    - name: Make AnyKernel3
+      run: |
+        git clone https://github.com/Numbersf/AnyKernel3
+        git -C AnyKernel3 checkout --detach 47f23f7ece3ef212a392ec9ea5466e5f0b55d3c7
+        rm -rf ./AnyKernel3/.git
+        mkdir -p kernel_workspace/kernel_platform/out/Final-Image-Find/
+        image_path=""
+        if [ -d "./kernel_workspace/kernel_platform/common/out/" ]; then
+          image_path=$(find "./kernel_workspace/kernel_platform/common/out/" -name "Image" | head -n 1)
+          if [ -n "$image_path" ]; then
+            echo "✅ 使用 make 编译的统一路径，成功找到 Image 文件"
+          fi
+        fi
+        if [ -z "$image_path" ] && [ -d "./kernel_workspace/kernel_platform/out/" ]; then
+          image_path=$(find "./kernel_workspace/kernel_platform/out/" -name "Image" | head -n 1)
+          if [ -n "$image_path" ]; then
+            echo "✅ 使用官方脚本编译，成功找到 Image 文件"
+          fi
+        fi
+        if [ -z "$image_path" ]; then
+          echo "❌ 未找到 Image 文件，构建失败" >&2
+          exit 1
+        fi
+        if [ -f "$image_path" ]; then
+          echo "✅ Image file finally located at: $image_path"
+          cp "$image_path" ./AnyKernel3/Image
+          cp "$image_path" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
+        fi
+    - name: Apply KPX and Replace Image
+      run: |
+        KPM_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/kpm"
+        # KPM_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches/kpm"
+        KPN_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches/kpn"
+        OUT_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/out/Final-Image-Find"
+        cd "${OUT_DIR}"
+        if [ "KPM" = "KPM" ]; then
+          cp "${KPM_DIR}/patch_linux" .
+          chmod +x patch_linux
+          ./patch_linux
+        else
+          cp "${KPN_DIR}/kptools-linux" "${KPN_DIR}/kpimg-linux" .
+          chmod +x ./kptools-linux
+          ./kptools-linux -p -i ./Image -k ./kpimg-linux -o ./oImage
+        fi
+        mv -f oImage Image
+        cp Image "${GITHUB_WORKSPACE}/AnyKernel3/Image"
+
+        test -s Image
+    - name: Package flashable AK3 zip
+      run: |
+        test -s AnyKernel3/Image
+        test -f AnyKernel3/META-INF/com/google/android/update-binary
+        cp configs/oneplus13t-16.0.5.701.xml AnyKernel3/build-manifest.xml
+        cat > AnyKernel3/build-info.txt <<'INFO'
+        Device: OnePlus 13T PKX110
+        Firmware source: 16.0.5.701(CN01)
+        Kernel: android15-6.6.89
+        SukiSU release version baseline: v4.2.0 / 40900
+        SukiSU builtin: b20dee702035af09cb2ecb5f35443bbc1747f3e6
+        SUSFS: v2.2.0 / a5d22370122e0eb2b2f7c5e3cadaa30ea1e3ca2f
+        KPM: enabled, Image patched
+        INFO
+        mkdir -p artifacts
+        (cd AnyKernel3 && zip -qr ../artifacts/AK3_OnePlus13T_16.0.5.701_6.6.89_Suki40900_KPM_SUSFS.zip .)
+        sha256sum artifacts/*.zip | tee artifacts/SHA256SUMS.txt
+    - name: Upload flashable AK3
+      uses: actions/upload-artifact@v7
+      with:
+        name: AK3_OnePlus13T_701_Suki40900_KPM_SUSFS
+        path: artifacts/*
+        if-no-files-found: error
+    - name: Upload build diagnostics
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: OnePlus13T_701_build_logs
+        path: |-
+          build.log
+          kernel_workspace/kernel_platform/common/out/.config
+        include-hidden-files: true
+        if-no-files-found: ignore
